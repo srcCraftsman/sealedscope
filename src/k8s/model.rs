@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use chrono;
 use k8s_openapi::api::core::v1::Secret;
 use kube::core::DynamicObject;
 use sha2::{Digest, Sha256};
@@ -98,9 +99,25 @@ impl SealedSecretItem {
         })
     }
 
-    /// Human-readable age from created_at RFC-3339 string.
+    /// Human-readable age from created_at RFC-3339 string (e.g. "3d", "12h", "45m", "30s").
     pub fn age(&self) -> String {
-        self.created_at.as_deref().unwrap_or("-").to_string()
+        let ts = match &self.created_at {
+            Some(s) => s,
+            None => return "-".to_string(),
+        };
+        let parsed = match chrono::DateTime::parse_from_rfc3339(ts) {
+            Ok(t) => t,
+            Err(_) => return ts.clone(),
+        };
+        let secs = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
+            .num_seconds()
+            .max(0) as u64;
+        match secs {
+            s if s < 60 => format!("{s}s"),
+            s if s < 3600 => format!("{}m", s / 60),
+            s if s < 86400 => format!("{}h", s / 3600),
+            s => format!("{}d", s / 86400),
+        }
     }
 }
 
@@ -207,5 +224,18 @@ mod tests {
     fn key_status_badge() {
         assert_eq!(KeyStatus::Active.badge(), "active");
         assert_eq!(KeyStatus::Expired.badge(), "expired");
+    }
+
+    #[test]
+    fn age_formats_days() {
+        use std::collections::BTreeMap;
+        // 3 days ago in RFC-3339
+        let three_days_ago = chrono::Utc::now() - chrono::Duration::days(3);
+        let s = SealedSecretItem {
+            name: "x".into(), namespace: "y".into(), resolved_key: None,
+            created_at: Some(three_days_ago.to_rfc3339()),
+            labels: BTreeMap::new(), annotations: BTreeMap::new(),
+        };
+        assert!(s.age().ends_with('d'), "expected days, got: {}", s.age());
     }
 }
