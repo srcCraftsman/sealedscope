@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use chrono;
+use chrono::{DateTime, Duration, Utc};
 use k8s_openapi::api::core::v1::Secret;
 use kube::core::DynamicObject;
 use sha2::{Digest, Sha256};
@@ -105,11 +105,11 @@ impl SealedSecretItem {
             Some(s) => s,
             None => return "-".to_string(),
         };
-        let parsed = match chrono::DateTime::parse_from_rfc3339(ts) {
+        let parsed = match DateTime::parse_from_rfc3339(ts) {
             Ok(t) => t,
             Err(_) => return ts.clone(),
         };
-        let secs = (chrono::Utc::now() - parsed.with_timezone(&chrono::Utc))
+        let secs = (Utc::now() - parsed.with_timezone(&Utc))
             .num_seconds()
             .max(0) as u64;
         match secs {
@@ -226,16 +226,40 @@ mod tests {
         assert_eq!(KeyStatus::Expired.badge(), "expired");
     }
 
+    fn make_item_with_age(offset: Duration) -> SealedSecretItem {
+        let ts = (Utc::now() - offset).to_rfc3339();
+        SealedSecretItem {
+            name: "x".into(), namespace: "y".into(), resolved_key: None,
+            created_at: Some(ts),
+            labels: BTreeMap::new(), annotations: BTreeMap::new(),
+        }
+    }
+
     #[test]
     fn age_formats_days() {
-        use std::collections::BTreeMap;
-        // 3 days ago in RFC-3339
-        let three_days_ago = chrono::Utc::now() - chrono::Duration::days(3);
+        let age = make_item_with_age(Duration::days(3)).age();
+        assert!(age.ends_with('d'), "expected days, got: {age}");
+    }
+
+    #[test]
+    fn age_formats_hours() {
+        let age = make_item_with_age(Duration::hours(5)).age();
+        assert!(age.ends_with('h'), "expected hours, got: {age}");
+    }
+
+    #[test]
+    fn age_formats_minutes() {
+        let age = make_item_with_age(Duration::minutes(30)).age();
+        assert!(age.ends_with('m'), "expected minutes, got: {age}");
+    }
+
+    #[test]
+    fn age_none_returns_dash() {
         let s = SealedSecretItem {
             name: "x".into(), namespace: "y".into(), resolved_key: None,
-            created_at: Some(three_days_ago.to_rfc3339()),
+            created_at: None,
             labels: BTreeMap::new(), annotations: BTreeMap::new(),
         };
-        assert!(s.age().ends_with('d'), "expected days, got: {}", s.age());
+        assert_eq!(s.age(), "-");
     }
 }
