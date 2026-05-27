@@ -51,7 +51,8 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
-    let mut app = App::new(context_list, active_context);
+    let mut app = App::new(context_list, active_context.clone());
+    app.default_namespace = k8s::client::default_namespace_for_context(&active_context);
 
     // Spawn input reader
     let input_tx = tx.clone();
@@ -95,7 +96,11 @@ async fn run(
                 AppEvent::KeysUpdated(..) | AppEvent::SecretsUpdated(..) => {
                     // stale generation — ignore
                 }
-                AppEvent::WatchError(e) => app.status = format!("Watch error: {e}"),
+                AppEvent::WatchError(epoch, msg) => {
+                    if epoch.map_or(true, |e| e == app.generation) {
+                        app.status = format!("Watch error: {msg}");
+                    }
+                }
             },
         }
 
@@ -113,6 +118,8 @@ async fn run(
             app.keys_list_state.select(Some(0));
             app.secrets_table_state.select(Some(0));
             app.detail_scroll = 0;
+            app.default_namespace =
+                k8s::client::default_namespace_for_context(&app.active_context);
             app.generation += 1;
 
             match k8s::client::client_for_context(&app.active_context).await {

@@ -32,7 +32,7 @@ pub fn spawn_watchers(
         let ns = controller_ns.clone();
         handles.push(tokio::spawn(async move {
             if let Err(e) = watch_sealing_keys(c, &ns, t.clone(), generation).await {
-                let _ = t.send(AppEvent::WatchError(e.to_string())).await;
+                let _ = t.send(AppEvent::WatchError(Some(generation), e.to_string())).await;
             }
         }));
     }
@@ -43,7 +43,7 @@ pub fn spawn_watchers(
         let t = tx.clone();
         handles.push(tokio::spawn(async move {
             if let Err(e) = watch_sealed_secrets(c, t.clone(), generation).await {
-                let _ = t.send(AppEvent::WatchError(e.to_string())).await;
+                let _ = t.send(AppEvent::WatchError(Some(generation), e.to_string())).await;
             }
         }));
     }
@@ -53,16 +53,20 @@ pub fn spawn_watchers(
 
 /// Reads crossterm key events and forwards them as AppEvent::Input.
 pub async fn read_input(tx: Sender<AppEvent>) {
-    use crossterm::event::{Event, EventStream};
+    use crossterm::event::{Event, EventStream, KeyEventKind};
     let mut reader = EventStream::new();
     loop {
         match reader.next().await {
-            Some(Ok(Event::Key(key))) => {
+            Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                 if tx.send(AppEvent::Input(key)).await.is_err() {
                     break;
                 }
             }
-            Some(Err(_)) | None => break,
+            Some(Err(e)) => {
+                let _ = tx.send(AppEvent::WatchError(None, format!("input error: {e}"))).await;
+                break;
+            }
+            None => break,
             _ => {}
         }
     }
@@ -85,7 +89,7 @@ async fn watch_sealing_keys(
         match stream.next().await {
             None => break,
             Some(Err(e)) => {
-                tx.send(AppEvent::WatchError(format!("keys watcher: {e}"))).await?;
+                tx.send(AppEvent::WatchError(Some(generation), format!("keys watcher: {e}"))).await?;
                 // kube watcher auto-reconnects; keep looping
             }
             Some(Ok(event)) => {
@@ -130,7 +134,7 @@ async fn watch_sealed_secrets(
         match stream.next().await {
             None => break,
             Some(Err(e)) => {
-                tx.send(AppEvent::WatchError(format!("secrets watcher: {e}"))).await?;
+                tx.send(AppEvent::WatchError(Some(generation), format!("secrets watcher: {e}"))).await?;
             }
             Some(Ok(event)) => {
                 let uid = |obj: &DynamicObject| {

@@ -20,7 +20,7 @@ pub enum NamespaceFilter {
 }
 
 impl NamespaceFilter {
-    pub fn toggle(self) -> Self {
+    pub fn toggle(&self) -> Self {
         match self {
             NamespaceFilter::All => NamespaceFilter::Default,
             NamespaceFilter::Default => NamespaceFilter::All,
@@ -39,7 +39,8 @@ pub enum AppEvent {
     KeysUpdated(u64, Vec<SealingKey>),
     SecretsUpdated(u64, Vec<SealedSecretItem>),
     Input(KeyEvent),
-    WatchError(String),
+    /// (generation, message) — generation `None` means "always display"
+    WatchError(Option<u64>, String),
 }
 
 pub struct App {
@@ -57,6 +58,8 @@ pub struct App {
     pub context_popup_selected: usize,
     pub show_help: bool,
     pub ns_filter: NamespaceFilter,
+    /// Default namespace for the active kubeconfig context (used by `n` filter).
+    pub default_namespace: String,
     pub status: String,
     pub generation: u64,
     pub restart_requested: bool,
@@ -80,6 +83,7 @@ impl App {
             context_popup_selected: 0,
             show_help: false,
             ns_filter: NamespaceFilter::All,
+            default_namespace: "default".to_string(),
             status: "Connecting…".to_string(),
             generation: 0,
             restart_requested: false,
@@ -110,6 +114,12 @@ impl App {
 
         let keys_snapshot = self.keys.clone();
         for secret in &self.raw_secrets {
+            // Apply namespace filter before mapping
+            if self.ns_filter == NamespaceFilter::Default
+                && secret.namespace != self.default_namespace
+            {
+                continue;
+            }
             let bucket = key_name_for_sealed_secret(
                 &secret.annotations,
                 &keys_snapshot,
@@ -257,7 +267,8 @@ impl App {
             }
             KeyCode::Char('r') => self.restart_requested = true,
             KeyCode::Char('n') => {
-                self.ns_filter = self.ns_filter.clone().toggle();
+                self.ns_filter = self.ns_filter.toggle();
+                self.remap();
             }
             KeyCode::Tab => self.cycle_focus(),
             KeyCode::Up | KeyCode::Char('k') => self.navigate_up(),
@@ -386,9 +397,9 @@ mod tests {
     fn namespace_filter_toggles() {
         let mut app = make_app();
         assert_eq!(app.ns_filter, NamespaceFilter::All);
-        app.ns_filter = app.ns_filter.clone().toggle();
+        app.ns_filter = app.ns_filter.toggle();
         assert_eq!(app.ns_filter, NamespaceFilter::Default);
-        app.ns_filter = app.ns_filter.clone().toggle();
+        app.ns_filter = app.ns_filter.toggle();
         assert_eq!(app.ns_filter, NamespaceFilter::All);
     }
 }

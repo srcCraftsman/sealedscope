@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::Secret;
 use kube::core::DynamicObject;
 use sha2::{Digest, Sha256};
@@ -26,7 +26,9 @@ pub struct SealingKey {
     pub name: String,
     pub status: KeyStatus,
     pub created_at: Option<String>,
-    /// SHA-256 of raw tls.crt DER bytes, hex-encoded (display only)
+    /// SHA-256 of raw tls.crt DER bytes, hex-encoded.
+    /// Reserved for future ciphertext-fingerprint matching; not yet used at runtime.
+    #[allow(dead_code)]
     pub fingerprint: Option<String>,
 }
 
@@ -157,6 +159,7 @@ pub fn key_name_for_sealed_secret(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Duration;
 
     fn make_key(name: &str, created_at: &str) -> SealingKey {
         SealingKey {
