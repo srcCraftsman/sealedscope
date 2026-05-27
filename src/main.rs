@@ -51,7 +51,7 @@ async fn run(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
 ) -> anyhow::Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AppEvent>(256);
-    let mut app = App::new(context_list, active_context.clone());
+    let mut app = App::new(context_list, active_context);
 
     // Spawn input reader
     let input_tx = tx.clone();
@@ -61,7 +61,12 @@ async fn run(
     let mut watch_handles = match k8s::client::client_for_context(&app.active_context).await {
         Ok(client) => {
             app.status = format!("Watching {}", app.active_context);
-            k8s::watcher::spawn_watchers(client, args.controller_namespace.clone(), tx.clone())
+            k8s::watcher::spawn_watchers(
+                client,
+                args.controller_namespace.clone(),
+                tx.clone(),
+                app.generation,
+            )
         }
         Err(e) => {
             app.status = format!("Error: {e}");
@@ -80,14 +85,18 @@ async fn run(
                         break;
                     }
                 }
-                AppEvent::KeysUpdated(keys) => app.update_keys(keys),
-                AppEvent::SecretsUpdated(secrets) => app.update_secrets(secrets),
+                // Discard events from previous generations (stale watcher tasks)
+                AppEvent::KeysUpdated(epoch, keys) if epoch == app.generation => {
+                    app.update_keys(keys)
+                }
+                AppEvent::SecretsUpdated(epoch, secrets) if epoch == app.generation => {
+                    app.update_secrets(secrets)
+                }
+                AppEvent::KeysUpdated(..) | AppEvent::SecretsUpdated(..) => {
+                    // stale generation — ignore
+                }
                 AppEvent::WatchError(e) => app.status = format!("Watch error: {e}"),
             },
-        }
-
-        if app.should_quit {
-            break;
         }
 
         // Context switch
@@ -97,9 +106,14 @@ async fn run(
                 h.abort();
             }
             app.status = format!("Switching to {}…", app.active_context);
+            // Clear all data and reset UI state before new watchers start
             app.keys = vec![];
             app.raw_secrets = vec![];
             app.secrets_by_key.clear();
+            app.keys_list_state.select(Some(0));
+            app.secrets_table_state.select(Some(0));
+            app.detail_scroll = 0;
+            app.generation += 1;
 
             match k8s::client::client_for_context(&app.active_context).await {
                 Ok(client) => {
@@ -108,6 +122,7 @@ async fn run(
                         client,
                         args.controller_namespace.clone(),
                         tx.clone(),
+                        app.generation,
                     );
                 }
                 Err(e) => {
@@ -122,6 +137,15 @@ async fn run(
             for h in watch_handles.drain(..) {
                 h.abort();
             }
+            // Clear stale data so the UI shows a clean reconnect
+            app.keys = vec![];
+            app.raw_secrets = vec![];
+            app.secrets_by_key.clear();
+            app.keys_list_state.select(Some(0));
+            app.secrets_table_state.select(Some(0));
+            app.detail_scroll = 0;
+            app.generation += 1;
+
             match k8s::client::client_for_context(&app.active_context).await {
                 Ok(client) => {
                     app.status = format!("Restarted — watching {}", app.active_context);
@@ -129,6 +153,7 @@ async fn run(
                         client,
                         args.controller_namespace.clone(),
                         tx.clone(),
+                        app.generation,
                     );
                 }
                 Err(e) => app.status = format!("Restart error: {e}"),

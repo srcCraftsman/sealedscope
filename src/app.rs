@@ -36,8 +36,8 @@ impl NamespaceFilter {
 
 #[derive(Debug)]
 pub enum AppEvent {
-    KeysUpdated(Vec<SealingKey>),
-    SecretsUpdated(Vec<SealedSecretItem>),
+    KeysUpdated(u64, Vec<SealingKey>),
+    SecretsUpdated(u64, Vec<SealedSecretItem>),
     Input(KeyEvent),
     WatchError(String),
 }
@@ -58,7 +58,7 @@ pub struct App {
     pub show_help: bool,
     pub ns_filter: NamespaceFilter,
     pub status: String,
-    pub should_quit: bool,
+    pub generation: u64,
     pub restart_requested: bool,
     pub context_switch_requested: bool,
 }
@@ -81,7 +81,7 @@ impl App {
             show_help: false,
             ns_filter: NamespaceFilter::All,
             status: "Connecting…".to_string(),
-            should_quit: false,
+            generation: 0,
             restart_requested: false,
             context_switch_requested: false,
         };

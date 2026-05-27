@@ -14,11 +14,14 @@ use crate::{
 };
 
 /// Spawns two background tasks: one watching sealing key Secrets, one watching SealedSecrets.
+/// `generation` is stamped on every event so the main loop can discard stale messages
+/// from a previous watcher that was aborted but had buffered events in-flight.
 /// Returns their JoinHandles so they can be aborted on context switch.
 pub fn spawn_watchers(
     client: Client,
     controller_ns: String,
     tx: Sender<AppEvent>,
+    generation: u64,
 ) -> Vec<JoinHandle<()>> {
     let mut handles = Vec::new();
 
@@ -28,7 +31,7 @@ pub fn spawn_watchers(
         let t = tx.clone();
         let ns = controller_ns.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = watch_sealing_keys(c, &ns, t.clone()).await {
+            if let Err(e) = watch_sealing_keys(c, &ns, t.clone(), generation).await {
                 let _ = t.send(AppEvent::WatchError(e.to_string())).await;
             }
         }));
@@ -39,7 +42,7 @@ pub fn spawn_watchers(
         let c = client.clone();
         let t = tx.clone();
         handles.push(tokio::spawn(async move {
-            if let Err(e) = watch_sealed_secrets(c, t.clone()).await {
+            if let Err(e) = watch_sealed_secrets(c, t.clone(), generation).await {
                 let _ = t.send(AppEvent::WatchError(e.to_string())).await;
             }
         }));
@@ -69,6 +72,7 @@ async fn watch_sealing_keys(
     client: Client,
     controller_ns: &str,
     tx: Sender<AppEvent>,
+    generation: u64,
 ) -> anyhow::Result<()> {
     let api: Api<Secret> = Api::namespaced(client, controller_ns);
     let cfg = watcher::Config::default()
@@ -103,7 +107,7 @@ async fn watch_sealing_keys(
                     .iter()
                     .filter_map(SealingKey::from_secret)
                     .collect();
-                tx.send(AppEvent::KeysUpdated(keys)).await?;
+                tx.send(AppEvent::KeysUpdated(generation, keys)).await?;
             }
         }
     }
@@ -113,6 +117,7 @@ async fn watch_sealing_keys(
 async fn watch_sealed_secrets(
     client: Client,
     tx: Sender<AppEvent>,
+    generation: u64,
 ) -> anyhow::Result<()> {
     let gvk = GroupVersionKind::gvk("bitnami.com", "v1alpha1", "SealedSecret");
     let ar = ApiResource::from_gvk(&gvk);
@@ -151,7 +156,7 @@ async fn watch_sealed_secrets(
                     .iter()
                     .filter_map(SealedSecretItem::from_dynamic)
                     .collect();
-                tx.send(AppEvent::SecretsUpdated(secrets)).await?;
+                tx.send(AppEvent::SecretsUpdated(generation, secrets)).await?;
             }
         }
     }
