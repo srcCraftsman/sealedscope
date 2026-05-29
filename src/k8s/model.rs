@@ -9,7 +9,6 @@ use rsa::pkcs8::DecodePrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
 use rsa::Oaep;
 
-pub const SEALED_BY_ANNOTATION: &str = "sealedsecrets.bitnami.com/sealed-by";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyStatus {
@@ -94,7 +93,6 @@ pub struct SealedSecretItem {
     pub created_at: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
-    #[allow(dead_code)]
     pub encrypted_sample: Option<Vec<u8>>,
 }
 
@@ -165,40 +163,7 @@ impl SealedSecretItem {
     }
 }
 
-/// Returns the key name this secret belongs to, or None for the unknown bucket.
-///
-/// Tier 1: `sealedsecrets.bitnami.com/sealed-by` annotation (direct match).
-/// Tier 2: Most-recently-created key whose `created_at` <= secret's `created_at`.
-pub fn key_name_for_sealed_secret(
-    annotations: &BTreeMap<String, String>,
-    keys: &[SealingKey],
-    secret_created_at: Option<&str>,
-) -> Option<String> {
-    // Tier 1
-    if let Some(name) = annotations.get(SEALED_BY_ANNOTATION) {
-        return Some(name.clone());
-    }
-    // Tier 2
-    if let Some(secret_ts) = secret_created_at {
-        let mut best: Option<&SealingKey> = None;
-        for key in keys {
-            if let Some(key_ts) = &key.created_at {
-                if key_ts.as_str() <= secret_ts {
-                    let is_newer_best = best
-                        .map(|b| b.created_at.as_deref().unwrap_or("") < key_ts.as_str())
-                        .unwrap_or(true);
-                    if is_newer_best {
-                        best = Some(key);
-                    }
-                }
-            }
-        }
-        return best.map(|k| k.name.clone());
-    }
-    None
-}
 
-#[allow(dead_code)]
 fn oaep_label(
     annotations: &BTreeMap<String, String>,
     namespace: &str,
@@ -221,7 +186,6 @@ fn oaep_label(
     }
 }
 
-#[allow(dead_code)]
 pub fn resolve_key(
     annotations: &BTreeMap<String, String>,
     namespace: &str,
@@ -247,69 +211,6 @@ pub fn resolve_key(
 mod tests {
     use super::*;
     use chrono::Duration;
-
-    fn make_key(name: &str, created_at: &str) -> SealingKey {
-        SealingKey {
-            name: name.to_string(),
-            status: KeyStatus::Active,
-            created_at: Some(created_at.to_string()),
-            fingerprint: None,
-            rsa_private_key: None,
-        }
-    }
-
-    #[test]
-    fn annotation_match_returns_key_name() {
-        let mut ann = BTreeMap::new();
-        ann.insert(SEALED_BY_ANNOTATION.to_string(), "key-abc".to_string());
-        let result = key_name_for_sealed_secret(&ann, &[], None);
-        assert_eq!(result, Some("key-abc".to_string()));
-    }
-
-    #[test]
-    fn annotation_takes_priority_over_timestamp() {
-        let mut ann = BTreeMap::new();
-        ann.insert(SEALED_BY_ANNOTATION.to_string(), "key-ann".to_string());
-        let keys = vec![make_key("key-ts", "2024-01-01T00:00:00Z")];
-        let result = key_name_for_sealed_secret(&ann, &keys, Some("2024-06-01T00:00:00Z"));
-        assert_eq!(result, Some("key-ann".to_string()));
-    }
-
-    #[test]
-    fn timestamp_fallback_picks_most_recent_key_before_secret() {
-        let keys = vec![
-            make_key("key-old", "2024-01-01T00:00:00Z"),
-            make_key("key-new", "2024-06-01T00:00:00Z"),
-        ];
-        // secret created after key-new
-        let result = key_name_for_sealed_secret(&BTreeMap::new(), &keys, Some("2024-09-01T00:00:00Z"));
-        assert_eq!(result, Some("key-new".to_string()));
-    }
-
-    #[test]
-    fn timestamp_fallback_picks_only_key_older_than_secret() {
-        let keys = vec![
-            make_key("key-old", "2024-01-01T00:00:00Z"),
-            make_key("key-future", "2025-01-01T00:00:00Z"),
-        ];
-        // secret created between the two keys
-        let result = key_name_for_sealed_secret(&BTreeMap::new(), &keys, Some("2024-06-01T00:00:00Z"));
-        assert_eq!(result, Some("key-old".to_string()));
-    }
-
-    #[test]
-    fn no_annotation_no_timestamp_returns_none() {
-        let keys = vec![make_key("key-old", "2024-01-01T00:00:00Z")];
-        let result = key_name_for_sealed_secret(&BTreeMap::new(), &keys, None);
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn all_keys_newer_than_secret_returns_none() {
-        let keys = vec![make_key("key-future", "2025-01-01T00:00:00Z")];
-        let result = key_name_for_sealed_secret(&BTreeMap::new(), &keys, Some("2024-01-01T00:00:00Z"));
-        assert_eq!(result, None);
-    }
 
     #[test]
     fn key_status_badge() {

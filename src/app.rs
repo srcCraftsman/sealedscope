@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::widgets::{ListState, TableState};
 use crate::k8s::{
-    model::{key_name_for_sealed_secret, SealedSecretItem, SealingKey},
+    model::{resolve_key, SealedSecretItem, SealingKey},
     UNKNOWN_KEY,
 };
 
@@ -120,10 +120,12 @@ impl App {
             {
                 continue;
             }
-            let bucket = key_name_for_sealed_secret(
+            let bucket = resolve_key(
                 &secret.annotations,
+                &secret.namespace,
+                &secret.name,
+                secret.encrypted_sample.as_deref(),
                 &keys_snapshot,
-                secret.created_at.as_deref(),
             )
             .unwrap_or_else(|| UNKNOWN_KEY.to_string());
 
@@ -367,9 +369,36 @@ mod tests {
 
     #[test]
     fn update_secrets_maps_to_correct_key_bucket() {
+        use rand::thread_rng;
+        use rsa::{RsaPrivateKey, RsaPublicKey};
+        use rsa::Oaep;
+        use sha2::Sha256;
+
+        // Generate a real RSA key pair and encrypt a session key so resolve_key can match it.
+        let private_key = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key);
+        let label = "default/my-secret"; // strict scope: namespace/name
+        let padding = Oaep::new_with_label::<Sha256, _>(label);
+        let encrypted = public_key
+            .encrypt(&mut thread_rng(), padding, &[0xBBu8; 32])
+            .unwrap();
+
+        let mut sealing_key = make_key("key-abc");
+        sealing_key.rsa_private_key = Some(private_key);
+
+        let secret = SealedSecretItem {
+            name: "my-secret".to_string(),
+            namespace: "default".to_string(),
+            resolved_key: None,
+            created_at: None,
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            encrypted_sample: Some(encrypted),
+        };
+
         let mut app = make_app();
-        app.update_keys(vec![make_key("key-abc")]);
-        app.update_secrets(vec![make_secret("my-secret", "key-abc")]);
+        app.update_keys(vec![sealing_key]);
+        app.update_secrets(vec![secret]);
         let secrets = app.current_secrets();
         assert_eq!(secrets.len(), 1);
         assert_eq!(secrets[0].name, "my-secret");
