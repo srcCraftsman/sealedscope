@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use rsa::RsaPrivateKey;
 use rsa::pkcs8::DecodePrivateKey;
 use rsa::pkcs1::DecodeRsaPrivateKey;
+use rsa::Oaep;
 
 pub const SEALED_BY_ANNOTATION: &str = "sealedsecrets.bitnami.com/sealed-by";
 
@@ -193,6 +194,51 @@ pub fn key_name_for_sealed_secret(
             }
         }
         return best.map(|k| k.name.clone());
+    }
+    None
+}
+
+#[allow(dead_code)]
+fn oaep_label(
+    annotations: &BTreeMap<String, String>,
+    namespace: &str,
+    name: &str,
+) -> String {
+    if annotations
+        .get("sealedsecrets.bitnami.com/cluster-wide")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        String::new()
+    } else if annotations
+        .get("sealedsecrets.bitnami.com/namespace-wide")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        namespace.to_string()
+    } else {
+        format!("{}/{}", namespace, name)
+    }
+}
+
+#[allow(dead_code)]
+pub fn resolve_key(
+    annotations: &BTreeMap<String, String>,
+    namespace: &str,
+    name: &str,
+    encrypted_sample: Option<&[u8]>,
+    keys: &[SealingKey],
+) -> Option<String> {
+    let rsa_blob = encrypted_sample?;
+    let label = oaep_label(annotations, namespace, name);
+
+    for key in keys {
+        if let Some(pk) = &key.rsa_private_key {
+            let padding = Oaep::new_with_label::<Sha256, _>(label.as_str());
+            if pk.decrypt(padding, rsa_blob).is_ok() {
+                return Some(key.name.clone());
+            }
+        }
     }
     None
 }
@@ -387,6 +433,128 @@ mod tests {
 
         let sk = SealingKey::from_secret(&secret).unwrap();
         assert!(sk.rsa_private_key.is_some(), "expected PKCS#8 key to parse");
+    }
+
+    // ── oaep_label ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn oaep_label_strict_scope() {
+        let ann = BTreeMap::new();
+        assert_eq!(oaep_label(&ann, "default", "my-secret"), "default/my-secret");
+    }
+
+    #[test]
+    fn oaep_label_namespace_wide() {
+        let mut ann = BTreeMap::new();
+        ann.insert(
+            "sealedsecrets.bitnami.com/namespace-wide".to_string(),
+            "true".to_string(),
+        );
+        assert_eq!(oaep_label(&ann, "default", "my-secret"), "default");
+    }
+
+    #[test]
+    fn oaep_label_cluster_wide() {
+        let mut ann = BTreeMap::new();
+        ann.insert(
+            "sealedsecrets.bitnami.com/cluster-wide".to_string(),
+            "true".to_string(),
+        );
+        assert_eq!(oaep_label(&ann, "default", "my-secret"), "");
+    }
+
+    // ── resolve_key ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_key_finds_correct_key() {
+        use rand::thread_rng;
+        use rsa::RsaPublicKey;
+
+        let private_key = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+        let public_key = RsaPublicKey::from(&private_key);
+
+        let session_key = [0xBBu8; 32];
+        let label = "default/my-secret";
+        let padding = Oaep::new_with_label::<Sha256, _>(label);
+        let encrypted = public_key
+            .encrypt(&mut thread_rng(), padding, &session_key)
+            .unwrap();
+
+        let sk = SealingKey {
+            name: "sealing-key-1".to_string(),
+            status: KeyStatus::Active,
+            created_at: None,
+            fingerprint: None,
+            rsa_private_key: Some(private_key),
+        };
+
+        let ann = BTreeMap::new(); // strict scope → label "default/my-secret"
+        let result = resolve_key(&ann, "default", "my-secret", Some(&encrypted), &[sk]);
+        assert_eq!(result, Some("sealing-key-1".to_string()));
+    }
+
+    #[test]
+    fn resolve_key_wrong_keys_return_none() {
+        use rand::thread_rng;
+        use rsa::RsaPublicKey;
+
+        let key_a = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+        let key_b = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+
+        let padding = Oaep::new_with_label::<Sha256, _>("default/my-secret");
+        let encrypted = RsaPublicKey::from(&key_a)
+            .encrypt(&mut thread_rng(), padding, &[0u8; 32])
+            .unwrap();
+
+        let sk_b = SealingKey {
+            name: "key-b".to_string(),
+            status: KeyStatus::Active,
+            created_at: None,
+            fingerprint: None,
+            rsa_private_key: Some(key_b),
+        };
+
+        let ann = BTreeMap::new();
+        let result = resolve_key(&ann, "default", "my-secret", Some(&encrypted), &[sk_b]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_key_skips_keys_without_private_key() {
+        use rand::thread_rng;
+        use rsa::RsaPublicKey;
+
+        let key = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+        let padding = Oaep::new_with_label::<Sha256, _>("default/my-secret");
+        let encrypted = RsaPublicKey::from(&key)
+            .encrypt(&mut thread_rng(), padding, &[0u8; 32])
+            .unwrap();
+
+        let sk = SealingKey {
+            name: "key-no-priv".to_string(),
+            status: KeyStatus::Active,
+            created_at: None,
+            fingerprint: None,
+            rsa_private_key: None,
+        };
+
+        let ann = BTreeMap::new();
+        let result = resolve_key(&ann, "default", "my-secret", Some(&encrypted), &[sk]);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn resolve_key_none_sample_returns_none() {
+        let sk = SealingKey {
+            name: "any-key".to_string(),
+            status: KeyStatus::Active,
+            created_at: None,
+            fingerprint: None,
+            rsa_private_key: None,
+        };
+        let ann = BTreeMap::new();
+        let result = resolve_key(&ann, "default", "my-secret", None, &[sk]);
+        assert_eq!(result, None);
     }
 
     #[test]
