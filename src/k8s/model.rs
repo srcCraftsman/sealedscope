@@ -3,6 +3,9 @@ use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::Secret;
 use kube::core::DynamicObject;
 use sha2::{Digest, Sha256};
+use rsa::RsaPrivateKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::pkcs1::DecodeRsaPrivateKey;
 
 pub const SEALED_BY_ANNOTATION: &str = "sealedsecrets.bitnami.com/sealed-by";
 
@@ -21,7 +24,7 @@ impl KeyStatus {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SealingKey {
     pub name: String,
     pub status: KeyStatus,
@@ -30,6 +33,19 @@ pub struct SealingKey {
     /// Reserved for future ciphertext-fingerprint matching; not yet used at runtime.
     #[allow(dead_code)]
     pub fingerprint: Option<String>,
+    pub rsa_private_key: Option<RsaPrivateKey>,
+}
+
+impl std::fmt::Debug for SealingKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SealingKey")
+            .field("name", &self.name)
+            .field("status", &self.status)
+            .field("created_at", &self.created_at)
+            .field("fingerprint", &self.fingerprint)
+            .field("rsa_private_key", &self.rsa_private_key.as_ref().map(|_| "<RSA key>"))
+            .finish()
+    }
 }
 
 impl SealingKey {
@@ -54,7 +70,17 @@ impl SealingKey {
                 let hash = Sha256::digest(&bytes.0);
                 hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
             });
-        Some(SealingKey { name, status, created_at, fingerprint })
+        let rsa_private_key = s
+            .data
+            .as_ref()
+            .and_then(|d| d.get("tls.key"))
+            .and_then(|bytes| std::str::from_utf8(&bytes.0).ok())
+            .and_then(|pem| {
+                RsaPrivateKey::from_pkcs8_pem(pem)
+                    .or_else(|_| RsaPrivateKey::from_pkcs1_pem(pem))
+                    .ok()
+            });
+        Some(SealingKey { name, status, created_at, fingerprint, rsa_private_key })
     }
 }
 
@@ -167,6 +193,7 @@ mod tests {
             status: KeyStatus::Active,
             created_at: Some(created_at.to_string()),
             fingerprint: None,
+            rsa_private_key: None,
         }
     }
 
@@ -264,5 +291,63 @@ mod tests {
             labels: BTreeMap::new(), annotations: BTreeMap::new(),
         };
         assert_eq!(s.age(), "-");
+    }
+
+    #[test]
+    fn from_secret_parses_pkcs8_private_key() {
+        use rsa::pkcs8::EncodePrivateKey;
+        use rand::thread_rng;
+
+        let key = RsaPrivateKey::new(&mut thread_rng(), 2048).unwrap();
+        let pem = key.to_pkcs8_pem(rsa::pkcs8::LineEnding::LF).unwrap();
+
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.name = Some("sealing-key-pkcs8".to_string());
+        secret.metadata.labels = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "sealedsecrets.bitnami.com/sealed-secrets-key".to_string(),
+                "active".to_string(),
+            );
+            m
+        });
+        secret.data = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "tls.key".to_string(),
+                k8s_openapi::ByteString(pem.as_bytes().to_vec()),
+            );
+            m
+        });
+
+        let sk = SealingKey::from_secret(&secret).unwrap();
+        assert!(sk.rsa_private_key.is_some(), "expected PKCS#8 key to parse");
+    }
+
+    #[test]
+    fn from_secret_bad_tls_key_gives_none_rsa_key() {
+        let mut secret = k8s_openapi::api::core::v1::Secret::default();
+        secret.metadata.name = Some("sealing-key-bad".to_string());
+        secret.metadata.labels = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "sealedsecrets.bitnami.com/sealed-secrets-key".to_string(),
+                "active".to_string(),
+            );
+            m
+        });
+        secret.data = Some({
+            let mut m = std::collections::BTreeMap::new();
+            m.insert(
+                "tls.key".to_string(),
+                k8s_openapi::ByteString(b"not valid pem".to_vec()),
+            );
+            m
+        });
+
+        let sk = SealingKey::from_secret(&secret).unwrap();
+        assert!(sk.rsa_private_key.is_none(), "bad PEM must not panic, must yield None");
+        assert_eq!(sk.name, "sealing-key-bad");
+        assert_eq!(sk.status, KeyStatus::Active);
     }
 }

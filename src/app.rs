@@ -322,6 +322,7 @@ mod tests {
             status: KeyStatus::Active,
             created_at: None,
             fingerprint: None,
+            rsa_private_key: None,
         }
     }
 
