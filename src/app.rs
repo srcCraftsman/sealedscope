@@ -339,6 +339,7 @@ mod tests {
             created_at: None,
             labels: BTreeMap::new(),
             annotations: ann,
+            encrypted_sample: None,
         }
     }
 
@@ -385,6 +386,7 @@ mod tests {
             created_at: None,
             labels: BTreeMap::new(),
             annotations: BTreeMap::new(),
+            encrypted_sample: None,
         };
         app.update_secrets(vec![s]);
         let unknown_idx = app.keys.len();

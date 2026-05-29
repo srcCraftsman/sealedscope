@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::Secret;
 use kube::core::DynamicObject;
@@ -92,6 +93,8 @@ pub struct SealedSecretItem {
     pub created_at: Option<String>,
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
+    #[allow(dead_code)]
+    pub encrypted_sample: Option<Vec<u8>>,
 }
 
 impl SealedSecretItem {
@@ -117,14 +120,26 @@ impl SealedSecretItem {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        Some(SealedSecretItem {
-            name,
-            namespace,
-            resolved_key: None,
-            created_at,
-            labels,
-            annotations,
-        })
+        // All values share the same sealing key; pick any one — BTreeMap gives deterministic order.
+        let encrypted_sample = obj
+            .data
+            .get("spec")
+            .and_then(|s| s.get("encryptedData"))
+            .and_then(|ed| ed.as_object())
+            .and_then(|m| m.values().next())
+            .and_then(|v| v.as_str())
+            .and_then(|b64| B64.decode(b64).ok())
+            .and_then(|bytes| {
+                if bytes.len() < 2 {
+                    return None;
+                }
+                let rsa_len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+                if rsa_len == 0 || bytes.len() < 2 + rsa_len {
+                    return None;
+                }
+                Some(bytes[2..2 + rsa_len].to_vec())
+            });
+        Some(SealedSecretItem { name, namespace, resolved_key: None, created_at, labels, annotations, encrypted_sample })
     }
 
     /// Human-readable age from created_at RFC-3339 string (e.g. "3d", "12h", "45m", "30s").
@@ -262,6 +277,7 @@ mod tests {
             name: "x".into(), namespace: "y".into(), resolved_key: None,
             created_at: Some(ts),
             labels: BTreeMap::new(), annotations: BTreeMap::new(),
+            encrypted_sample: None,
         }
     }
 
@@ -289,8 +305,57 @@ mod tests {
             name: "x".into(), namespace: "y".into(), resolved_key: None,
             created_at: None,
             labels: BTreeMap::new(), annotations: BTreeMap::new(),
+            encrypted_sample: None,
         };
         assert_eq!(s.age(), "-");
+    }
+
+    #[test]
+    fn from_dynamic_extracts_rsa_blob() {
+        // Build a well-formed sealed-secrets ciphertext:
+        // [u16 BE: 256] [256 bytes RSA blob] [28 bytes fake AES-GCM payload]
+        let rsa_blob: Vec<u8> = (0u8..=255).collect(); // 256 distinct bytes
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&(256u16).to_be_bytes());
+        wire.extend_from_slice(&rsa_blob);
+        wire.extend_from_slice(&[0xAAu8; 28]); // fake nonce + ciphertext
+
+        let b64 = B64.encode(&wire);
+
+        let obj = kube::core::DynamicObject {
+            types: None,
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("my-secret".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            data: serde_json::json!({
+                "spec": {
+                    "encryptedData": {
+                        "password": b64
+                    }
+                }
+            }),
+        };
+
+        let item = SealedSecretItem::from_dynamic(&obj).unwrap();
+        assert_eq!(item.encrypted_sample, Some(rsa_blob));
+    }
+
+    #[test]
+    fn from_dynamic_missing_spec_gives_none_sample() {
+        let obj = kube::core::DynamicObject {
+            types: None,
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+                name: Some("my-secret".to_string()),
+                namespace: Some("default".to_string()),
+                ..Default::default()
+            },
+            data: serde_json::json!({}),
+        };
+
+        let item = SealedSecretItem::from_dynamic(&obj).unwrap();
+        assert!(item.encrypted_sample.is_none());
     }
 
     #[test]
